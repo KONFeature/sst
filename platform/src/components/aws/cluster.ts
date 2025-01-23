@@ -8,7 +8,14 @@ import {
   output,
   secret,
 } from "@pulumi/pulumi";
-import { Component, Prettify, Transform, transform } from "../component";
+import {
+  Component,
+  ComponentVersion,
+  parseComponentVersion,
+  Prettify,
+  Transform,
+  transform,
+} from "../component";
 import { Input } from "../input";
 import { Dns } from "../dns";
 import { FunctionArgs } from "./function";
@@ -904,17 +911,6 @@ export interface ClusterArgs {
      */
     cluster?: Transform<ecs.ClusterArgs>;
   };
-}
-
-export interface ClusterGetArgs {
-  /**
-   * The id of the cluster.
-   */
-  id: Input<string>;
-  /**
-   * The default VPC where service / task added to this cluster will be placed.
-   */
-  vpc: Vpc | Input<Prettify<ClusterVpcArgs>>;
 }
 
 export interface ClusterServiceArgs extends ClusterBaseArgs {
@@ -2160,10 +2156,21 @@ export interface ClusterTaskArgs extends ClusterBaseArgs {
   };
 }
 
+export interface ClusterGetArgs {
+  /**
+   * The ID of the cluster.
+   */
+  id: Input<string>;
+  /**
+   * The VPC used for the cluster.
+   */
+  vpc: ClusterArgs["vpc"];
+}
+
 interface ClusterRef {
-  ref: true,
-  id: Input<string>,
-  executionRoleArn: string,
+  ref: true;
+  id: Input<string>;
+  vpc: ClusterArgs["vpc"];
 }
 
 /**
@@ -2445,7 +2452,7 @@ interface ClusterRef {
  */
 export class Cluster extends Component {
   private constructorOpts: ComponentResourceOptions;
-  private cluster: ecs.Cluster;
+  private cluster: Output<ecs.Cluster>;
   private vpc: Vpc | Output<Prettify<ClusterVpcsNormalizedArgs>>;
   public static v1 = ClusterV1;
 
@@ -2455,35 +2462,52 @@ export class Cluster extends Component {
     opts: ComponentResourceOptions = {},
   ) {
     super(__pulumiType, name, args, opts);
-    const _version = 2;
+    const _version = { major: 2, minor: 0 };
     const self = this;
+    this.constructorOpts = opts;
 
     if (args && "ref" in args) {
-      const ref = args as unknown as ClusterRef;
-      this.constructorOpts = opts;
-      this.vpc = normalizeVpc();
-
-      const clusterRef = ecs.Cluster.get(`${name}Cluster`, ref.id, undefined, opts);
-      clusterRef.tags.apply((tags) => {
-        registerVersion(
-          tags?.["sst:component-version"]
-            ? parseInt(tags["sst:component-version"])
-            : undefined,
-        );
-      });
-      this.cluster = clusterRef;
+      const ref = reference();
+      const vpc = normalizeVpc();
+      this.cluster = ref.cluster;
+      this.vpc = vpc;
       return;
     }
 
     registerVersion();
-
     const vpc = normalizeVpc();
     const cluster = createCluster();
     createCapacityProviders();
 
-    this.constructorOpts = opts;
-    this.cluster = cluster;
+    this.cluster = output(cluster);
     this.vpc = vpc;
+
+    function reference() {
+      const ref = args as ClusterRef;
+      const cluster = ecs.Cluster.get(`${name}Cluster`, ref.id, undefined, {
+        parent: self,
+      });
+      const clusterValidated = cluster.tags.apply((tags) => {
+        const refVersion = tags?.["sst:ref:version"]
+          ? parseComponentVersion(tags["sst:ref:version"])
+          : undefined;
+
+        if (refVersion?.minor !== _version.minor) {
+          throw new VisibleError(
+            [
+              `There have been some minor changes to the "Cluster" component that's being referenced by "${name}".\n`,
+              `To update, you'll need to redeploy the stage where the cluster was created. And then redeploy this stage.`,
+            ].join("\n"),
+          );
+        }
+
+        registerVersion(refVersion);
+
+        return cluster;
+      });
+
+      return { cluster: clusterValidated };
+    }
 
     function normalizeVpc() {
       // "vpc" is a Vpc.v1 component
@@ -2522,16 +2546,23 @@ export class Cluster extends Component {
         ...transform(
           args.transform?.cluster,
           `${name}Cluster`,
-          {},
+          {
+            tags: {
+              "sst:ref:version": `${_version.major}.${_version.minor}`,
+            },
+          },
           { parent: self },
         ),
       );
     }
 
-    function registerVersion(overrideVersion?: number) {
+    function registerVersion(overrideVersion?: ComponentVersion) {
+      const newMajorVersion = _version.major;
+      const oldMajorVersion =
+        overrideVersion?.major ?? $cli.state.version[name];
       self.registerVersion({
-        new: _version,
-        old: overrideVersion ?? $cli.state.version[name],
+        new: newMajorVersion,
+        old: oldMajorVersion,
         message: [
           `There is a new version of "Cluster" that has breaking changes.`,
           ``,
@@ -2540,7 +2571,7 @@ export class Cluster extends Component {
           `  - In the latest version, both the load balancer and the services are deployed in public subnets. The VPC is not required to have NAT gateways. So the new default makes this cheaper to run.`,
           ``,
           `To upgrade:`,
-          `  - Set \`forceUpgrade: "v${_version}"\` on the "Cluster" component. Learn more https://sst.dev/docs/component/aws/cluster#forceupgrade`,
+          `  - Set \`forceUpgrade: "v${newMajorVersion}"\` on the "Cluster" component. Learn more https://sst.dev/docs/component/aws/cluster#forceupgrade`,
           ``,
           `To continue using v${$cli.state.version[name]}:`,
           `  - Rename "Cluster" to "Cluster.v${$cli.state.version[name]}". Learn more about versioning - https://sst.dev/docs/components/#versioning`,
@@ -2555,6 +2586,13 @@ export class Cluster extends Component {
         capacityProviders: ["FARGATE", "FARGATE_SPOT"],
       });
     }
+  }
+
+  /**
+   * The cluster ID.
+   */
+  public get id() {
+    return this.cluster.id;
   }
 
   /**
@@ -2688,44 +2726,34 @@ export class Cluster extends Component {
   }
 
   /**
-   * The generated id of the ECS Cluster.
-   */
-  public get id() {
-    return this.cluster.id;
-  }
-
-  /**
-   * Reference an existing ECS Cluster with the given id. This is useful when you
-   * create a Cluster in one stage and want to share it in another. It avoids
-   * having to create a new Cluster in the other stage.
+   * Reference an existing ECS Cluster with the given ID. This is useful when you
+   * create a cluster in one stage and want to share it in another. It avoids
+   * having to create a new cluster in the other stage.
    *
    * :::tip
-   * You can use the `static get` method to share Cluster across stages / projects.
+   * You can use the `static get` method to share cluster across stages.
    * :::
    *
    * @param name The name of the component.
-   * @param args The arguments to get the Cluster.
+   * @param args The arguments to get the cluster.
    * @param opts? Resource options.
    *
    * @example
-   * Imagine you create a cluster in the `preprod` stage. And in your dev stage `dev`,
-   * instead of creating a new cluster, you want to share the same cluster from `preprod`.
+   * Imagine you create a cluster in the `dev` stage. And in your personal stage `frank`,
+   * instead of creating a new cluster, you want to share the same cluster from `dev`.
    *
    * ```ts title="sst.config.ts"
-   * const vpc = new sst.aws.Vpc("MyVpc");
-   * 
-   * const cluster = $app.stage === "dev"
+   * const cluster = $app.stage === "frank"
    *   ? sst.aws.Cluster.get("MyCluster", {
-   *       id: "app-preprod-mycluster",
-   *        vpc
+   *       id: "arn:aws:ecs:us-east-1:123456789012:cluster/app-dev-MyCluster",
+   *       vpc,
    *     })
-   *   : new sst.aws.Cluster("MyCluster", {
-   *        vpc
-   *     });
+   *   : new sst.aws.Cluster("MyCluster", { vpc });
    * ```
    *
-   * Here `app-preprod-mycluster` is the ID of the cluster created in the `preprod` stage. 
-   * You can find these by outputting the cluster ID in the `preprod` stage.
+   * Here `arn:aws:ecs:us-east-1:123456789012:cluster/app-dev-MyCluster` is the ID of the
+   * cluster created in the `dev` stage. You can find these by outputting the cluster ID
+   * in the `dev` stage.
    *
    * ```ts title="sst.config.ts"
    * return {
@@ -2738,7 +2766,11 @@ export class Cluster extends Component {
     args: ClusterGetArgs,
     opts?: ComponentResourceOptions,
   ) {
-    return new Cluster(name, args as ClusterArgs, opts);
+    return new Cluster(
+      name,
+      { ref: true, id: args.id, vpc: args.vpc } as ClusterArgs,
+      opts,
+    );
   }
 }
 
