@@ -2663,7 +2663,7 @@ export class Cluster extends Component {
    *
    * This is useful for running sidecar containers.
    */
-  public addService(name: string, args?: ClusterServiceArgs) {
+  public addService(name: string, args?: ClusterServiceArgs, opts?: Omit<ComponentResourceOptions, "provider">) {
     // Do not prefix the service to allow `Resource.MyService` to work.
     return new Service(
       name,
@@ -2672,7 +2672,7 @@ export class Cluster extends Component {
         vpc: this.vpc,
         ...args,
       },
-      { provider: this.constructorOpts.provider },
+      { ...opts, provider: this.constructorOpts.provider },
     );
   }
 
@@ -2712,7 +2712,7 @@ export class Cluster extends Component {
    *
    * This is useful for running sidecar containers.
    */
-  public addTask(name: string, args?: ClusterTaskArgs) {
+  public addTask(name: string, args?: ClusterTaskArgs, opts?: Omit<ComponentResourceOptions, "provider">) {
     // Do not prefix the task to allow `Resource.MyTask` to work.
     return new Task(
       name,
@@ -2721,7 +2721,7 @@ export class Cluster extends Component {
         vpc: this.vpc,
         ...args,
       },
-      { provider: this.constructorOpts.provider },
+      { ...opts, provider: this.constructorOpts.provider },
     );
   }
 
