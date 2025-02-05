@@ -2677,7 +2677,7 @@ export class Cluster extends Component {
         vpc: this.vpc,
         ...args,
       },
-      { ...opts, provider: this.constructorOpts.provider },
+      { provider: this.constructorOpts.provider, ...opts },
     );
   }
 
@@ -2731,7 +2731,7 @@ export class Cluster extends Component {
         vpc: this.vpc,
         ...args,
       },
-      { ...opts, provider: this.constructorOpts.provider },
+      { provider: this.constructorOpts.provider, ...opts },
     );
   }
 
